@@ -104,6 +104,9 @@ hello.utils.extend(hello, {
 		// Ths could be problematic if the redirect_uri is indeed the final place,
 		// Typically this circumvents the problem of the redirect_url being a dumb relay page.
 		page_uri: window.location.href
+		,
+		// Optional whitelist for redirect targets. Can be string, RegExp, or array of either
+		redirect_whitelist: null
 	},
 
 	// Service configuration objects
@@ -1336,101 +1339,1386 @@ hello.utils.extend(hello.utils, {
 
 		p = _this.merge(_this.param(location.search || ''), _this.param(location.hash || ''));
 
-		
-			// If p.state 
+		// If p.state
+		if (p && 'state' in p) {
 
-if (p && 'state' in p) { 
+			// Remove any addition information
+			// E.g. p.state = 'facebook.page';
+			try {
+				var a = JSON.parse(p.state);
+				_this.extend(p, a);
+			}
+			catch (e) {
+				var stateDecoded = decodeURIComponent(p.state);
+				try {
+					var b = JSON.parse(stateDecoded);
+					_this.extend(p, b);
+				}
+				catch (e) {
+					console.error('Could not decode state parameter');
+				}
+			}
 
- 
+			// Access_token?
+			if (('access_token' in p && p.access_token) && p.network) {
 
-// Remove any addition information 
+				if (!p.expires_in || parseInt(p.expires_in, 10) === 0) {
+					// If p.expires_in is unset, set to 0
+					p.expires_in = 0;
+				}
 
-// E.g. p.state = 'facebook.page'; 
+				p.expires_in = parseInt(p.expires_in, 10);
+				p.expires = ((new Date()).getTime() / 1e3) + (p.expires_in || (60 * 60 * 24 * 365));
 
-try { 
+				// Lets use the "state" to assign it to one of our networks
+				authCallback(p, window, parent);
+			}
 
-var a = JSON.parse(p.state); 
+			// Error=?
+			// &error_description=?
+			// &state=?
+			else if (('error' in p && p.error) && p.network) {
 
-_this.extend(p, a); 
+				p.error = {
+					code: p.error,
+					message: p.error_message || p.error_description
+				};
 
-} 
+				// Let the state handler handle it
+				authCallback(p, window, parent);
+			}
 
-catch (e) { 
+			// API call, or a cancelled login
+			// Result is serialized JSON string
+			else if (p.callback && p.callback in parent) {
 
-var stateDecoded = decodeURIComponent(p.state); 
+				// Trigger a function in the parent
+				var res = 'result' in p && p.result ? JSON.parse(p.result) : false;
 
-try { 
+				// Trigger the callback on the parent
+				callback(parent, p.callback)(res);
+				closeWindow();
+			}
 
-var b = JSON.parse(stateDecoded); 
+			// If this page is still open
+			if (p.page_uri && isValidUrl(p.page_uri)) {
+				location.assign(p.page_uri);
+			}
+		}
 
-_this.extend(p, b); 
+		// OAuth redirect, fixes URI fragments from being lost in Safari
+		// (URI Fragments within 302 Location URI are lost over HTTPS)
+		// Loading the redirect.html before triggering the OAuth Flow seems to fix it.
+		else if ('oauth_redirect' in p) {
+			var url = decodeURIComponent(p.oauth_redirect);
 
-} 
+			// Attempt an additional decode to counter double-encoding
+			try {
+				url = decodeURIComponent(url);
+			}
+			catch (e) {}
 
-catch (e) { 
+			if (isValidUrl(url)) {
+				location.assign(url);
+			}
 
-console.error('Could not decode state parameter'); 
+			return;
+		}
 
-} 
+		function isValidUrl(url) {
+			var regexp = /^https?:/;
+			if (!regexp.test(url)) {
+				return false;
+			}
 
-} 
+			// Optional global regex whitelist
+			if (Object.prototype.hasOwnProperty.call(window, 'HELLOJS_REDIRECT_URL') && !url.match(window.HELLOJS_REDIRECT_URL)) {
+				return false;
+			}
 
- 
+			// Optional settings-based whitelist
+			var wl = (typeof hello !== 'undefined' && hello.settings) ? hello.settings.redirect_whitelist : null;
+			if (wl) {
+				var matchOne = function(w) {
+					if (typeof w === 'string') {
+						return url.indexOf(w) === 0;
+					}
+					if (w instanceof RegExp) {
+						return w.test(url);
+					}
+					return false;
+				};
 
-// OAuth2 Access_token? 
+				if (Array.isArray(wl)) {
+					return wl.some(matchOne);
+				}
 
-// OAuth1 oauth_token? 
+				return matchOne(wl);
+			}
 
-if ((('access_token' in p && p.access_token) || ('oauth_token' in p && p.oauth_token)) && p.network) { 
+			return true;
+		}
 
- 
+		// Trigger a callback to authenticate
+		function authCallback(obj, window, parent) {
 
-// Normalize OAuth1 tokens to OAuth2 format 
+			var cb = obj.callback;
+			var network = obj.network;
 
-if (p.oauth_token) { 
+			// Trigger the callback on the parent
+			_this.store(network, obj);
 
-p.access_token = p.oauth_token; 
+			// If this is a page request it has no parent or opener window to handle callbacks
+			if (('display' in obj) && obj.display === 'page') {
+				return;
+			}
 
-// Store oauth_token_secret for signing requests 
+			// Remove from session object
+			if (parent && cb && cb in parent) {
 
-if (p.oauth_token_secret) { 
+				try {
+					delete obj.callback;
+				}
+				catch (e) {}
 
-p.access_token += ':' + p.oauth_token_secret; 
+				// Update store
+				_this.store(network, obj);
 
-} 
+				// Call the globalEvent function on the parent
+				// It's safer to pass back a string to the parent,
+				// Rather than an object/array (better for IE8)
+				var str = JSON.stringify(obj);
 
-} 
+				try {
+					callback(parent, cb)(str);
+				}
+				catch (e) {
+					// Error thrown whilst executing parent callback
+				}
+			}
 
- 
+			closeWindow();
+		}
 
-if (!p.expires_in || parseInt(p.expires_in, 10) === 0) { 
+		function callback(parent, callbackID) {
+			if (callbackID.indexOf('_hellojs_') !== 0) {
+				return function() {
+					throw 'Could not execute callback ' + callbackID;
+				};
+			}
 
-// If p.expires_in is unset, set to 0 
+			return parent[callbackID];
+		}
 
-p.expires_in = 0; 
+		function closeWindow() {
 
-} 
+			if (window.frameElement) {
+				// Inside an iframe, remove from parent
+				parent.document.body.removeChild(window.frameElement);
+			}
+			else {
+				// Close this current window
+				try {
+					window.close();
+				}
+				catch (e) {}
 
- 
+				// IOS bug wont let us close a popup if still loading
+				if (window.addEventListener) {
+					window.addEventListener('load', function() {
+						window.close();
+					});
+				}
+			}
 
-p.expires_in = parseInt(p.expires_in, 10); 
+		}
+	}
+});
 
-p.expires = ((new Date()).getTime() / 1e3) + (p.expires_in || (60 * 60 * 24 * 365)); 
+// Events
+// Extend the hello object with its own event instance
+hello.utils.Event.call(hello);
 
- 
+///////////////////////////////////
+// Monitoring session state
+// Check for session changes
+///////////////////////////////////
 
-// Store OAuth version for later use 
+(function(hello) {
 
-if (p.oauth) { 
+	// Monitor for a change in state and fire
+	var oldSessions = {};
 
-p.oauth_version = p.oauth.version; 
+	// Hash of expired tokens
+	var expired = {};
 
-} 
+	// Listen to other triggers to Auth events, use these to update this
+	hello.on('auth.login, auth.logout', function(auth) {
+		if (auth && typeof (auth) === 'object' && auth.network) {
+			oldSessions[auth.network] = hello.utils.store(auth.network) || {};
+		}
+	});
 
- 
+	(function self() {
 
-// Lets use the "state" to assign it to one of our networks 
+		var CURRENT_TIME = ((new Date()).getTime() / 1e3);
+		var emit = function(eventName) {
+			hello.emit('auth.' + eventName, {
+				network: name,
+				authResponse: session
+			});
+		};
 
-authCallback(p, window, parent); 
+		// Loop through the services
+		for (var name in hello.services) {if (hello.services.hasOwnProperty(name)) {
 
-} 
+			if (!hello.services[name].id) {
+				// We haven't attached an ID so dont listen.
+				continue;
+			}
+
+			// Get session
+			var session = hello.utils.store(name) || {};
+			var provider = hello.services[name];
+			var oldSess = oldSessions[name] || {};
+
+			// Listen for globalEvents that did not get triggered from the child
+			if (session && 'callback' in session) {
+
+				// To do remove from session object...
+				var cb = session.callback;
+				try {
+					delete session.callback;
+				}
+				catch (e) {}
+
+				// Update store
+				// Removing the callback
+				hello.utils.store(name, session);
+
+				// Emit global events
+				try {
+					window[cb](session);
+				}
+				catch (e) {}
+			}
+
+			// Refresh token
+			if (session && ('expires' in session) && session.expires < CURRENT_TIME) {
+
+				// If auto refresh is possible
+				// Either the browser supports
+				var refresh = provider.refresh || session.refresh_token;
+
+				// Has the refresh been run recently?
+				if (refresh && (!(name in expired) || expired[name] < CURRENT_TIME)) {
+					// Try to resignin
+					hello.emit('notice', name + ' has expired trying to resignin');
+					hello.login(name, {display: 'none', force: false});
+
+					// Update expired, every 10 minutes
+					expired[name] = CURRENT_TIME + 600;
+				}
+
+				// Does this provider not support refresh
+				else if (!refresh && !(name in expired)) {
+					// Label the event
+					emit('expired');
+					expired[name] = true;
+				}
+
+				// If session has expired then we dont want to store its value until it can be established that its been updated
+				continue;
+			}
+
+			// Has session changed?
+			else if (oldSess.access_token === session.access_token &&
+			oldSess.expires === session.expires) {
+				continue;
+			}
+
+			// Access_token has been removed
+			else if (!session.access_token && oldSess.access_token) {
+				emit('logout');
+			}
+
+			// Access_token has been created
+			else if (session.access_token && !oldSess.access_token) {
+				emit('login');
+			}
+
+			// Access_token has been updated
+			else if (session.expires !== oldSess.expires) {
+				emit('update');
+			}
+
+			// Updated stored session
+			oldSessions[name] = session;
+
+			// Remove the expired flags
+			if (name in expired) {
+				delete expired[name];
+			}
+		}}
+
+		// Check error events
+		setTimeout(self, 1000);
+	})();
+
+})(hello);
+
+// EOF CORE lib
+//////////////////////////////////
+
+/////////////////////////////////////////
+// API
+// @param path    string
+// @param query   object (optional)
+// @param method  string (optional)
+// @param data    object (optional)
+// @param timeout integer (optional)
+// @param callback  function (optional)
+
+hello.api = function() {
+
+	// Shorthand
+	var _this = this;
+	var utils = _this.utils;
+	var error = utils.error;
+
+	// Construct a new Promise object
+	var promise = utils.Promise();
+
+	// Arguments
+	var p = utils.args({path: 's!', query: 'o', method: 's', data: 'o', timeout: 'i', callback: 'f'}, arguments);
+
+	// Method
+	p.method = (p.method || 'get').toLowerCase();
+
+	// Headers
+	p.headers = p.headers || {};
+
+	// Query
+	p.query = p.query || {};
+
+	// If get, put all parameters into query
+	if (p.method === 'get' || p.method === 'delete') {
+		utils.extend(p.query, p.data);
+		p.data = {};
+	}
+
+	var data = p.data = p.data || {};
+
+	// Completed event callback
+	promise.then(p.callback, p.callback);
+
+	// Remove the network from path, e.g. facebook:/me/friends
+	// Results in { network : facebook, path : me/friends }
+	if (!p.path) {
+		return promise.reject(error('invalid_path', 'Missing the path parameter from the request'));
+	}
+
+	p.path = p.path.replace(/^\/+/, '');
+	var a = (p.path.split(/[\/\:]/, 2) || [])[0].toLowerCase();
+
+	if (a in _this.services) {
+		p.network = a;
+		var reg = new RegExp('^' + a + ':?\/?');
+		p.path = p.path.replace(reg, '');
+	}
+
+	// Network & Provider
+	// Define the network that this request is made for
+	p.network = _this.settings.default_service = p.network || _this.settings.default_service;
+	var o = _this.services[p.network];
+
+	// INVALID
+	// Is there no service by the given network name?
+	if (!o) {
+		return promise.reject(error('invalid_network', 'Could not match the service requested: ' + p.network));
+	}
+
+	// PATH
+	// As long as the path isn't flagged as unavaiable, e.g. path == false
+
+	if (!(!(p.method in o) || !(p.path in o[p.method]) || o[p.method][p.path] !== false)) {
+		return promise.reject(error('invalid_path', 'The provided path is not available on the selected network'));
+	}
+
+	// PROXY
+	// OAuth1 calls always need a proxy
+
+	if (!p.oauth_proxy) {
+		p.oauth_proxy = _this.settings.oauth_proxy;
+	}
+
+	if (!('proxy' in p)) {
+		p.proxy = p.oauth_proxy && o.oauth && parseInt(o.oauth.version, 10) === 1;
+	}
+
+	// TIMEOUT
+	// Adopt timeout from global settings by default
+
+	if (!('timeout' in p)) {
+		p.timeout = _this.settings.timeout;
+	}
+
+	// Format response
+	// Whether to run the raw response through post processing.
+	if (!('formatResponse' in p)) {
+		p.formatResponse = true;
+	}
+
+	// Get the current session
+	// Append the access_token to the query
+	p.authResponse = _this.getAuthResponse(p.network);
+	if (p.authResponse && p.authResponse.access_token) {
+		p.query.access_token = p.authResponse.access_token;
+	}
+
+	var url = p.path;
+	var m;
+
+	// Store the query as options
+	// This is used to populate the request object before the data is augmented by the prewrap handlers.
+	p.options = utils.clone(p.query);
+
+	// Clone the data object
+	// Prevent this script overwriting the data of the incoming object.
+	// Ensure that everytime we run an iteration the callbacks haven't removed some data
+	p.data = utils.clone(data);
+
+	// URL Mapping
+	// Is there a map for the given URL?
+	var actions = o[{'delete': 'del'}[p.method] || p.method] || {};
+
+	// Extrapolate the QueryString
+	// Provide a clean path
+	// Move the querystring into the data
+	if (p.method === 'get') {
+
+		var query = url.split(/[\?#]/)[1];
+		if (query) {
+			utils.extend(p.query, utils.param(query));
+
+			// Remove the query part from the URL
+			url = url.replace(/\?.*?(#|$)/, '$1');
+		}
+	}
+
+	// Is the hash fragment defined
+	if ((m = url.match(/#(.+)/, ''))) {
+		url = url.split('#')[0];
+		p.path = m[1];
+	}
+	else if (url in actions) {
+		p.path = url;
+		url = actions[url];
+	}
+	else if ('default' in actions) {
+		url = actions['default'];
+	}
+
+	// Redirect Handler
+	// This defines for the Form+Iframe+Hash hack where to return the results too.
+	p.redirect_uri = _this.settings.redirect_uri;
+
+	// Define FormatHandler
+	// The request can be procesed in a multitude of ways
+	// Here's the options - depending on the browser and endpoint
+	p.xhr = o.xhr;
+	p.jsonp = o.jsonp;
+	p.form = o.form;
+
+	// Make request
+	if (typeof (url) === 'function') {
+		// Does self have its own callback?
+		url(p, getPath);
+	}
+	else {
+		// Else the URL is a string
+		getPath(url);
+	}
+
+	return promise.proxy;
+
+	// If url needs a base
+	// Wrap everything in
+	function getPath(url) {
+
+		// Format the string if it needs it
+		url = url.replace(/\@\{([a-z\_\-]+)(\|.*?)?\}/gi, function(m, key, defaults) {
+			var val = defaults ? defaults.replace(/^\|/, '') : '';
+			if (key in p.query) {
+				val = p.query[key];
+				delete p.query[key];
+			}
+			else if (p.data && key in p.data) {
+				val = p.data[key];
+				delete p.data[key];
+			}
+			else if (!defaults) {
+				promise.reject(error('missing_attribute', 'The attribute ' + key + ' is missing from the request'));
+			}
+
+			return val;
+		});
+
+		// Add base
+		if (!url.match(/^https?:\/\//)) {
+			url = o.base + url;
+		}
+
+		// Define the request URL
+		p.url = url;
+
+		// Make the HTTP request with the curated request object
+		// CALLBACK HANDLER
+		// @ response object
+		// @ statusCode integer if available
+		utils.request(p, function(r, headers) {
+
+			// Is this a raw response?
+			if (!p.formatResponse) {
+				// Bad request? error statusCode or otherwise contains an error response vis JSONP?
+				if (typeof headers === 'object' ? (headers.statusCode >= 400) : (typeof r === 'object' && 'error' in r)) {
+					promise.reject(r);
+				}
+				else {
+					promise.fulfill(r);
+				}
+
+				return;
+			}
+
+			// Should this be an object
+			if (r === true) {
+				r = {success: true};
+			}
+			else if (!r) {
+				r = {};
+			}
+
+			// The delete callback needs a better response
+			if (p.method === 'delete') {
+				r = (!r || utils.isEmpty(r)) ? {success: true} : r;
+			}
+
+			// FORMAT RESPONSE?
+			// Does self request have a corresponding formatter
+			if (o.wrap && ((p.path in o.wrap) || ('default' in o.wrap))) {
+				var wrap = (p.path in o.wrap ? p.path : 'default');
+				var time = (new Date()).getTime();
+
+				// FORMAT RESPONSE
+				var b = o.wrap[wrap](r, headers, p);
+
+				// Has the response been utterly overwritten?
+				// Typically self augments the existing object.. but for those rare occassions
+				if (b) {
+					r = b;
+				}
+			}
+
+			// Is there a next_page defined in the response?
+			if (r && 'paging' in r && r.paging.next) {
+
+				// Add the relative path if it is missing from the paging/next path
+				if (r.paging.next[0] === '?') {
+					r.paging.next = p.path + r.paging.next;
+				}
+
+				// The relative path has been defined, lets markup the handler in the HashFragment
+				else {
+					r.paging.next += '#' + p.path;
+				}
+			}
+
+			// Dispatch to listeners
+			// Emit events which pertain to the formatted response
+			if (!r || 'error' in r) {
+				promise.reject(r);
+			}
+			else {
+				promise.fulfill(r);
+			}
+		});
+	}
+};
+
+// API utilities
+hello.utils.extend(hello.utils, {
+
+	// Make an HTTP request
+	request: function(p, callback) {
+
+		var _this = this;
+		var error = _this.error;
+
+		// This has to go through a POST request
+		if (!_this.isEmpty(p.data) && !('FileList' in window) && _this.hasBinary(p.data)) {
+
+			// Disable XHR and JSONP
+			p.xhr = false;
+			p.jsonp = false;
+		}
+
+		// Check if the browser and service support CORS
+		var cors = this.request_cors(function() {
+			// If it does then run this...
+			return ((p.xhr === undefined) || (p.xhr && (typeof (p.xhr) !== 'function' || p.xhr(p, p.query))));
+		});
+
+		if (cors) {
+
+			formatUrl(p, function(url) {
+
+				var x = _this.xhr(p.method, url, p.headers, p.data, callback);
+				x.onprogress = p.onprogress || null;
+
+				// Windows Phone does not support xhr.upload, see #74
+				// Feature detect
+				if (x.upload && p.onuploadprogress) {
+					x.upload.onprogress = p.onuploadprogress;
+				}
+
+			});
+
+			return;
+		}
+
+		// Clone the query object
+		// Each request modifies the query object and needs to be tared after each one.
+		var _query = p.query;
+
+		p.query = _this.clone(p.query);
+
+		// Assign a new callbackID
+		p.callbackID = _this.globalEvent();
+
+		// JSONP
+		if (p.jsonp !== false) {
+
+			// Clone the query object
+			p.query.callback = p.callbackID;
+
+			// If the JSONP is a function then run it
+			if (typeof (p.jsonp) === 'function') {
+				p.jsonp(p, p.query);
+			}
+
+			// Lets use JSONP if the method is 'get'
+			if (p.method === 'get') {
+
+				formatUrl(p, function(url) {
+					_this.jsonp(url, callback, p.callbackID, p.timeout);
+				});
+
+				return;
+			}
+			else {
+				// It's not compatible reset query
+				p.query = _query;
+			}
+
+		}
+
+		// Otherwise we're on to the old school, iframe hacks and JSONP
+		if (p.form !== false) {
+
+			// Add some additional query parameters to the URL
+			// We're pretty stuffed if the endpoint doesn't like these
+			p.query.redirect_uri = p.redirect_uri;
+			p.query.state = JSON.stringify({callback: p.callbackID});
+
+			var opts;
+
+			if (typeof (p.form) === 'function') {
+
+				// Format the request
+				opts = p.form(p, p.query);
+			}
+
+			if (p.method === 'post' && opts !== false) {
+
+				formatUrl(p, function(url) {
+					_this.post(url, p.data, opts, callback, p.callbackID, p.timeout);
+				});
+
+				return;
+			}
+		}
+
+		// None of the methods were successful throw an error
+		callback(error('invalid_request', 'There was no mechanism for handling this request'));
+
+		return;
+
+		// Format URL
+		// Constructs the request URL, optionally wraps the URL through a call to a proxy server
+		// Returns the formatted URL
+		function formatUrl(p, callback) {
+
+			// Are we signing the request?
+			var sign;
+
+			// OAuth1
+			// Remove the token from the query before signing
+			if (p.authResponse && p.authResponse.oauth && parseInt(p.authResponse.oauth.version, 10) === 1) {
+
+				// OAUTH SIGNING PROXY
+				sign = p.query.access_token;
+
+				// Remove the access_token
+				delete p.query.access_token;
+
+				// Enfore use of Proxy
+				p.proxy = true;
+			}
+
+			// POST body to querystring
+			if (p.data && (p.method === 'get' || p.method === 'delete')) {
+				// Attach the p.data to the querystring.
+				_this.extend(p.query, p.data);
+				p.data = null;
+			}
+
+			// Construct the path
+			var path = _this.qs(p.url, p.query);
+
+			// Proxy the request through a server
+			// Used for signing OAuth1
+			// And circumventing services without Access-Control Headers
+			if (p.proxy) {
+				// Use the proxy as a path
+				path = _this.qs(p.oauth_proxy, {
+					path: path,
+					access_token: sign || '',
+
+					// This will prompt the request to be signed as though it is OAuth1
+					then: p.proxy_response_type || (p.method.toLowerCase() === 'get' ? 'redirect' : 'proxy'),
+					method: p.method.toLowerCase(),
+					suppress_response_codes: p.suppress_response_codes || true
+				});
+			}
+
+			callback(path);
+		}
+	},
+
+	// Test whether the browser supports the CORS response
+	request_cors: function(callback) {
+		return 'withCredentials' in new XMLHttpRequest() && callback();
+	},
+
+	// Return the type of DOM object
+	domInstance: function(type, data) {
+		var test = 'HTML' + (type || '').replace(
+			/^[a-z]/,
+			function(m) {
+				return m.toUpperCase();
+			}
+
+		) + 'Element';
+
+		if (!data) {
+			return false;
+		}
+
+		if (window[test]) {
+			return data instanceof window[test];
+		}
+		else if (window.Element) {
+			return data instanceof window.Element && (!type || (data.tagName && data.tagName.toLowerCase() === type));
+		}
+		else {
+			return (!(data instanceof Object || data instanceof Array || data instanceof String || data instanceof Number) && data.tagName && data.tagName.toLowerCase() === type);
+		}
+	},
+
+	// Create a clone of an object
+	clone: function(obj) {
+		// Does not clone DOM elements, nor Binary data, e.g. Blobs, Filelists
+		if (obj === null || typeof (obj) !== 'object' || obj instanceof Date || 'nodeName' in obj || this.isBinary(obj) || (typeof FormData === 'function' && obj instanceof FormData)) {
+			return obj;
+		}
+
+		if (Array.isArray(obj)) {
+			// Clone each item in the array
+			return obj.map(this.clone.bind(this));
+		}
+
+		// But does clone everything else.
+		var clone = {};
+		for (var x in obj) {
+			clone[x] = this.clone(obj[x]);
+		}
+
+		return clone;
+	},
+
+	// XHR: uses CORS to make requests
+	xhr: function(method, url, headers, data, callback) {
+
+		var r = new XMLHttpRequest();
+		var error = this.error;
+
+		// Binary?
+		var binary = false;
+		if (method === 'blob') {
+			binary = method;
+			method = 'GET';
+		}
+
+		method = method.toUpperCase();
+
+		// Xhr.responseType 'json' is not supported in any of the vendors yet.
+		r.onload = function(e) {
+			var json = r.response;
+			try {
+				json = JSON.parse(r.responseText);
+			}
+			catch (_e) {
+				if (r.status === 401) {
+					json = error('access_denied', r.statusText);
+				}
+			}
+
+			var headers = headersToJSON(r.getAllResponseHeaders());
+			headers.statusCode = r.status;
+
+			callback(json || (method === 'GET' ? error('empty_response', 'Could not get resource') : {}), headers);
+		};
+
+		r.onerror = function(e) {
+			var json = r.responseText;
+			try {
+				json = JSON.parse(r.responseText);
+			}
+			catch (_e) {}
+
+			callback(json || error('access_denied', 'Could not get resource'));
+		};
+
+		var x;
+
+		// Should we add the query to the URL?
+		if (method === 'GET' || method === 'DELETE') {
+			data = null;
+		}
+		else if (data && typeof (data) !== 'string' && !(data instanceof FormData) && !(data instanceof File) && !(data instanceof Blob)) {
+			// Loop through and add formData
+			var f = new FormData();
+			for (x in data) if (data.hasOwnProperty(x)) {
+				if (data[x] instanceof HTMLInputElement) {
+					if ('files' in data[x] && data[x].files.length > 0) {
+						f.append(x, data[x].files[0]);
+					}
+				}
+				else if (data[x] instanceof Blob) {
+					f.append(x, data[x], data.name);
+				}
+				else {
+					f.append(x, data[x]);
+				}
+			}
+
+			data = f;
+		}
+
+		// Open the path, async
+		r.open(method, url, true);
+
+		if (binary) {
+			if ('responseType' in r) {
+				r.responseType = binary;
+			}
+			else {
+				r.overrideMimeType('text/plain; charset=x-user-defined');
+			}
+		}
+
+		// Set any bespoke headers
+		if (headers) {
+			for (x in headers) {
+				r.setRequestHeader(x, headers[x]);
+			}
+		}
+
+		r.send(data);
+
+		return r;
+
+		// Headers are returned as a string
+		function headersToJSON(s) {
+			var r = {};
+			var reg = /([a-z\-]+):\s?(.*);?/gi;
+			var m;
+			while ((m = reg.exec(s))) {
+				r[m[1]] = m[2];
+			}
+
+			return r;
+		}
+	},
+
+	// JSONP
+	// Injects a script tag into the DOM to be executed and appends a callback function to the window object
+	// @param string/function pathFunc either a string of the URL or a callback function pathFunc(querystringhash, continueFunc);
+	// @param function callback a function to call on completion;
+	jsonp: function(url, callback, callbackID, timeout) {
+
+		var _this = this;
+		var error = _this.error;
+
+		// Change the name of the callback
+		var bool = 0;
+		var head = document.getElementsByTagName('head')[0];
+		var operaFix;
+		var result = error('server_error', 'server_error');
+		var cb = function() {
+			if (!(bool++)) {
+				window.setTimeout(function() {
+					callback(result);
+					head.removeChild(script);
+				}, 0);
+			}
+
+		};
+
+		// Add callback to the window object
+		callbackID = _this.globalEvent(function(json) {
+			result = json;
+			return true;
+
+			// Mark callback as done
+		}, callbackID);
+
+		// The URL is a function for some cases and as such
+		// Determine its value with a callback containing the new parameters of this function.
+		url = url.replace(new RegExp('=\\?(&|$)'), '=' + callbackID + '$1');
+
+		// Build script tag
+		var script = _this.append('script', {
+			id: callbackID,
+			name: callbackID,
+			src: url,
+			async: true,
+			onload: cb,
+			onerror: cb,
+			onreadystatechange: function() {
+				if (/loaded|complete/i.test(this.readyState)) {
+					cb();
+				}
+			}
+		});
+
+		// Opera fix error
+		// Problem: If an error occurs with script loading Opera fails to trigger the script.onerror handler we specified
+		//
+		// Fix:
+		// By setting the request to synchronous we can trigger the error handler when all else fails.
+		// This action will be ignored if we've already called the callback handler "cb" with a successful onload event
+		if (window.navigator.userAgent.toLowerCase().indexOf('opera') > -1) {
+			operaFix = _this.append('script', {
+				text: 'document.getElementById(\'' + callbackID + '\').onerror();'
+			});
+			script.async = false;
+		}
+
+		// Add timeout
+		if (timeout) {
+			window.setTimeout(function() {
+				result = error('timeout', 'timeout');
+				cb();
+			}, timeout);
+		}
+
+		// TODO: add fix for IE,
+		// However: unable recreate the bug of firing off the onreadystatechange before the script content has been executed and the value of "result" has been defined.
+		// Inject script tag into the head element
+		head.appendChild(script);
+
+		// Append Opera Fix to run after our script
+		if (operaFix) {
+			head.appendChild(operaFix);
+		}
+	},
+
+	// Post
+	// Send information to a remote location using the post mechanism
+	// @param string uri path
+	// @param object data, key value data to send
+	// @param function callback, function to execute in response
+	post: function(url, data, options, callback, callbackID, timeout) {
+
+		var _this = this;
+		var error = _this.error;
+		var doc = document;
+
+		// This hack needs a form
+		var form = null;
+		var reenableAfterSubmit = [];
+		var newform;
+		var i = 0;
+		var x = null;
+		var bool = 0;
+		var cb = function(r) {
+			if (!(bool++)) {
+				callback(r);
+			}
+		};
+
+		// What is the name of the callback to contain
+		// We'll also use this to name the iframe
+		_this.globalEvent(cb, callbackID);
+
+		// Build the iframe window
+		var win;
+		try {
+			// IE7 hack, only lets us define the name here, not later.
+			win = doc.createElement('<iframe name="' + callbackID + '">');
+		}
+		catch (e) {
+			win = doc.createElement('iframe');
+		}
+
+		win.name = callbackID;
+		win.id = callbackID;
+		win.style.display = 'none';
+
+		// Override callback mechanism. Triggger a response onload/onerror
+		if (options && options.callbackonload) {
+			// Onload is being fired twice
+			win.onload = function() {
+				cb({
+					response: 'posted',
+					message: 'Content was posted'
+				});
+			};
+		}
+
+		if (timeout) {
+			setTimeout(function() {
+				cb(error('timeout', 'The post operation timed out'));
+			}, timeout);
+		}
+
+		doc.body.appendChild(win);
+
+		// If we are just posting a single item
+		if (_this.domInstance('form', data)) {
+			// Get the parent form
+			form = data.form;
+
+			// Loop through and disable all of its siblings
+			for (i = 0; i < form.elements.length; i++) {
+				if (form.elements[i] !== data) {
+					form.elements[i].setAttribute('disabled', true);
+				}
+			}
+
+			// Move the focus to the form
+			data = form;
+		}
+
+		// Posting a form
+		if (_this.domInstance('form', data)) {
+			// This is a form element
+			form = data;
+
+			// Does this form need to be a multipart form?
+			for (i = 0; i < form.elements.length; i++) {
+				if (!form.elements[i].disabled && form.elements[i].type === 'file') {
+					form.encoding = form.enctype = 'multipart/form-data';
+					form.elements[i].setAttribute('name', 'file');
+				}
+			}
+		}
+		else {
+			// Its not a form element,
+			// Therefore it must be a JSON object of Key=>Value or Key=>Element
+			// If anyone of those values are a input type=file we shall shall insert its siblings into the form for which it belongs.
+			for (x in data) if (data.hasOwnProperty(x)) {
+				// Is this an input Element?
+				if (_this.domInstance('input', data[x]) && data[x].type === 'file') {
+					form = data[x].form;
+					form.encoding = form.enctype = 'multipart/form-data';
+				}
+			}
+
+			// Do If there is no defined form element, lets create one.
+			if (!form) {
+				// Build form
+				form = doc.createElement('form');
+				doc.body.appendChild(form);
+				newform = form;
+			}
+
+			var input;
+
+			// Add elements to the form if they dont exist
+			for (x in data) if (data.hasOwnProperty(x)) {
+
+				// Is this an element?
+				var el = (_this.domInstance('input', data[x]) || _this.domInstance('textArea', data[x]) || _this.domInstance('select', data[x]));
+
+				// Is this not an input element, or one that exists outside the form.
+				if (!el || data[x].form !== form) {
+
+					// Does an element have the same name?
+					var inputs = form.elements[x];
+					if (input) {
+						// Remove it.
+						if (!(inputs instanceof NodeList)) {
+							inputs = [inputs];
+						}
+
+						for (i = 0; i < inputs.length; i++) {
+							inputs[i].parentNode.removeChild(inputs[i]);
+						}
+
+					}
+
+					// Create an input element
+					input = doc.createElement('input');
+					input.setAttribute('type', 'hidden');
+					input.setAttribute('name', x);
+
+					// Does it have a value attribute?
+					if (el) {
+						input.value = data[x].value;
+					}
+					else if (_this.domInstance(null, data[x])) {
+						input.value = data[x].innerHTML || data[x].innerText;
+					}
+					else {
+						input.value = data[x];
+					}
+
+					form.appendChild(input);
+				}
+
+				// It is an element, which exists within the form, but the name is wrong
+				else if (el && data[x].name !== x) {
+					data[x].setAttribute('name', x);
+					data[x].name = x;
+				}
+			}
+
+			// Disable elements from within the form if they weren't specified
+			for (i = 0; i < form.elements.length; i++) {
+
+				input = form.elements[i];
+
+				// Does the same name and value exist in the parent
+				if (!(input.name in data) && input.getAttribute('disabled') !== true) {
+					// Disable
+					input.setAttribute('disabled', true);
+
+					// Add re-enable to callback
+					reenableAfterSubmit.push(input);
+				}
+			}
+		}
+
+		// Set the target of the form
+		form.setAttribute('method', 'POST');
+		form.setAttribute('target', callbackID);
+		form.target = callbackID;
+
+		// Update the form URL
+		form.setAttribute('action', url);
+
+		// Submit the form
+		// Some reason this needs to be offset from the current window execution
+		setTimeout(function() {
+			form.submit();
+
+			setTimeout(function() {
+				try {
+					// Remove the iframe from the page.
+					//win.parentNode.removeChild(win);
+					// Remove the form
+					if (newform) {
+						newform.parentNode.removeChild(newform);
+					}
+				}
+				catch (e) {
+					try {
+						console.error('HelloJS: could not remove iframe');
+					}
+					catch (ee) {}
+				}
+
+				// Reenable the disabled form
+				for (var i = 0; i < reenableAfterSubmit.length; i++) {
+					if (reenableAfterSubmit[i]) {
+						reenableAfterSubmit[i].setAttribute('disabled', false);
+						reenableAfterSubmit[i].disabled = false;
+					}
+				}
+			}, 0);
+		}, 100);
+	},
+
+	// Some of the providers require that only multipart is used with non-binary forms.
+	// This function checks whether the form contains binary data
+	hasBinary: function(data) {
+		for (var x in data) if (data.hasOwnProperty(x)) {
+			if (this.isBinary(data[x])) {
+				return true;
+			}
+		}
+
+		return false;
+	},
+
+	// Determines if a variable Either Is or like a FormInput has the value of a Blob
+
+	isBinary: function(data) {
+
+		return data instanceof Object && (
+			(this.domInstance('input', data) && data.type === 'file') ||
+		('FileList' in window && data instanceof window.FileList) ||
+		('File' in window && data instanceof window.File) ||
+		('Blob' in window && data instanceof window.Blob));
+
+	},
+
+	// Convert Data-URI to Blob string
+	toBlob: function(dataURI) {
+		var reg = /^data\:([^;,]+(\;charset=[^;,]+)?)(\;base64)?,/i;
+		var m = dataURI.match(reg);
+		if (!m) {
+			return dataURI;
+		}
+
+		var binary = atob(dataURI.replace(reg, ''));
+		var array = [];
+		for (var i = 0; i < binary.length; i++) {
+			array.push(binary.charCodeAt(i));
+		}
+
+		return new Blob([new Uint8Array(array)], {type: m[1]});
+	}
+
+});
+
+// EXTRA: Convert FormElement to JSON for POSTing
+// Wrappers to add additional functionality to existing functions
+(function(hello) {
+
+	// Copy original function
+	var api = hello.api;
+	var utils = hello.utils;
+
+	utils.extend(utils, {
+
+		// DataToJSON
+		// This takes a FormElement|NodeList|InputElement|MixedObjects and convers the data object to JSON.
+		dataToJSON: function(p) {
+
+			var _this = this;
+			var w = window;
+			var data = p.data;
+
+			// Is data a form object
+			if (_this.domInstance('form', data)) {
+				data = _this.nodeListToJSON(data.elements);
+			}
+			else if ('NodeList' in w && data instanceof NodeList) {
+				data = _this.nodeListToJSON(data);
+			}
+			else if (_this.domInstance('input', data)) {
+				data = _this.nodeListToJSON([data]);
+			}
+
+			// Is data a blob, File, FileList?
+			if (('File' in w && data instanceof w.File) ||
+				('Blob' in w && data instanceof w.Blob) ||
+				('FileList' in w && data instanceof w.FileList)) {
+				data = {file: data};
+			}
+
+			// Loop through data if it's not form data it must now be a JSON object
+			if (!('FormData' in w && data instanceof w.FormData)) {
+
+				for (var x in data) if (data.hasOwnProperty(x)) {
+
+					if ('FileList' in w && data[x] instanceof w.FileList) {
+						if (data[x].length === 1) {
+							data[x] = data[x][0];
+						}
+					}
+					else if (_this.domInstance('input', data[x]) && data[x].type === 'file') {
+						continue;
+					}
+					else if (_this.domInstance('input', data[x]) ||
+						_this.domInstance('select', data[x]) ||
+						_this.domInstance('textArea', data[x])) {
+						data[x] = data[x].value;
+					}
+					else if (_this.domInstance(null, data[x])) {
+						data[x] = data[x].innerHTML || data[x].innerText;
+					}
+				}
+			}
+
+			p.data = data;
+			return data;
+		},
+
+		// NodeListToJSON
+		// Given a list of elements extrapolate their values and return as a json object
+		nodeListToJSON: function(nodelist) {
+
+			var json = {};
+
+			// Create a data string
+			for (var i = 0; i < nodelist.length; i++) {
+
+				var input = nodelist[i];
+
+				// If the name of the input is empty or diabled, dont add it.
+				if (input.disabled || !input.name) {
+					continue;
+				}
+
+				// Is this a file, does the browser not support 'files' and 'FormData'?
+				if (input.type === 'file') {
+					json[input.name] = input;
+				}
+				else {
+					json[input.name] = input.value || input.innerHTML;
+				}
+			}
+
+			return json;
+		}
+	});
+
+	// Replace it
+	hello.api = function() {
+
+		// Get arguments
+		var p = utils.args({path: 's!', method: 's', data: 'o', timeout: 'i', callback: 'f'}, arguments);
+
+		// Change for into a data object
+		if (p.data) {
+			utils.dataToJSON(p);
+		}
+
+		return api.call(this, p);
+	};
+
+})(hello);
+
+/////////////////////////////////////
+//
+// Save any access token that is in the current page URL
+// Handle any response solicited through iframe hash tag following an API request
+//
+/////////////////////////////////////
+
+hello.utils.responseHandler(window, window.opener || window.parent);
