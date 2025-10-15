@@ -193,8 +193,7 @@ hello.utils.extend(hello, {
 		var opts = p.options = utils.merge(_this.settings, p.options || {});
 
 		// Merge/override options with app defaults
-		// Provider may define default popup sizes via provider.popup
-		opts.popup = utils.merge(_this.settings.popup, ( _this.services[p.network] && _this.services[p.network].popup ) || {}, p.options.popup || {});
+		opts.popup = utils.merge(_this.settings.popup, p.options.popup || {});
 
 		// Network
 		p.network = p.network || _this.settings.default_service;
@@ -262,11 +261,11 @@ hello.utils.extend(hello, {
 		}
 
 		// Query string parameters, we may pass our own arguments to form the querystring
-		p.query = utils.merge(qs, {
+		p.qs = utils.merge(qs, {
 			client_id: encodeURIComponent(provider.id),
 			response_type: encodeURIComponent(responseType),
 			redirect_uri: encodeURIComponent(redirectUri),
-			state: {
+			state: opts.state || {
 				client_id: provider.id,
 				network: p.network,
 				display: opts.display,
@@ -288,7 +287,7 @@ hello.utils.extend(hello, {
 		var scope = _this.settings.scope ? [_this.settings.scope.toString()] : [];
 
 		// Extend the providers scope list with the default
-		var scopeMap = utils.merge(_this.settings.scope_map, provider.scope_map || {});
+		var scopeMap = utils.merge(_this.settings.scope_map, provider.scope || {});
 
 		// Add user defined scopes...
 		if (opts.scope) {
@@ -309,13 +308,11 @@ hello.utils.extend(hello, {
 		scope = utils.unique(scope).filter(filterEmpty);
 
 		// Save the the scopes to the state with the names that they were requested with.
-		p.query.state.scope = scope.join(',');
+		p.qs.state.scope = scope.join(',');
 
 		// Map scopes to the providers naming convention
-		// Blacklist standardized scopes unless explicitly mapped in the provider
-		scope = scope.filter(function(item){
-			return !(item in _this.settings.scope_map) || (item in scopeMap);
-		}).map(function(item) {
+		scope = scope.map(function(item) {
+			// Does this have a mapping?
 			return (item in scopeMap) ? scopeMap[item] : item;
 		});
 
@@ -327,14 +324,14 @@ hello.utils.extend(hello, {
 		scope = utils.unique(scope).filter(filterEmpty);
 
 		// Join with the expected scope delimiter into a string
-		p.query.scope = scope.join(provider.scope_delim || ',');
+		p.qs.scope = scope.join(provider.scope_delim || ',');
 
 		// Is the user already signed in with the appropriate scopes, valid access_token?
 		if (opts.force === false) {
 
 			if (session && 'access_token' in session && session.access_token && 'expires' in session && session.expires > ((new Date()).getTime() / 1e3)) {
 				// What is different about the scopes in the session vs the scopes in the new login?
-				var diff = utils.diff((session.scope || '').split(SCOPE_SPLIT), (p.query.state.scope || '').split(SCOPE_SPLIT));
+				var diff = utils.diff((session.scope || '').split(SCOPE_SPLIT), (p.qs.state.scope || '').split(SCOPE_SPLIT));
 				if (diff.length === 0) {
 
 					// OK trigger the callback
@@ -353,7 +350,7 @@ hello.utils.extend(hello, {
 		// Page URL
 		if (opts.display === 'page' && opts.page_uri) {
 			// Add a page location, place to endup after session has authenticated
-			p.query.state.page_uri = utils.url(opts.page_uri).href;
+			p.qs.state.page_uri = utils.url(opts.page_uri).href;
 		}
 
 		// Bespoke
@@ -369,46 +366,45 @@ hello.utils.extend(hello, {
 		parseInt(provider.oauth.version, 10) < 2 ||
 		(opts.display === 'none' && provider.oauth.grant && session && session.refresh_token)) {
 
-			// Add the oauth endpoints
-			// Allow overriding oauth endpoints via options.oauth
-			var providerOAuth = utils.merge({}, provider.oauth || {});
-			if (opts.oauth) { providerOAuth = utils.merge(providerOAuth, opts.oauth); }
-			p.query.state.oauth = providerOAuth;
+			if (typeof p.qs.state === 'string') {
+				// Keep the string value as is
+				// Do nothing, leave the state as the custom string value
+			} else {
+				// Add the oauth endpoints
+				p.qs.state.oauth = provider.oauth;
 
-			// Add the proxy url
-			p.query.state.oauth_proxy = opts.oauth_proxy;
+				// Add the proxy url
+				p.qs.state.oauth_proxy = opts.oauth_proxy;
+			}
 
 		}
 
 		// Convert state to a string
 		if (provider.oauth.base64_state) {
-			p.query.state = window.btoa(JSON.stringify(p.query.state));
+			p.qs.state = window.btoa(JSON.stringify(p.qs.state));
 		}
 		else {
-			p.query.state = encodeURIComponent(JSON.stringify(p.query.state));
+			p.qs.state = encodeURIComponent(JSON.stringify(p.qs.state));
 		}
 
 		// URL
 		if (parseInt(provider.oauth.version, 10) === 1) {
 
 			// Turn the request to the OAuth Proxy for 3-legged auth
-			url = utils.qs(opts.oauth_proxy, p.query, encodeFunction);
+			url = utils.qs(opts.oauth_proxy, p.qs, encodeFunction);
 		}
 
 		// Refresh token
 		else if (opts.display === 'none' && provider.oauth.grant && session && session.refresh_token) {
 
 			// Add the refresh_token to the request
-			p.query.refresh_token = session.refresh_token;
+			p.qs.refresh_token = session.refresh_token;
 
 			// Define the request path
-			url = utils.qs(opts.oauth_proxy, p.query, encodeFunction);
+			url = utils.qs(opts.oauth_proxy, p.qs, encodeFunction);
 		}
 		else {
-			// Apply oauth overrides when constructing auth URL
-			var authOAuth = utils.merge({}, provider.oauth || {});
-			if (opts.oauth) { authOAuth = utils.merge(authOAuth, opts.oauth); }
-			url = utils.qs(authOAuth.auth, p.query, encodeFunction);
+			url = utils.qs(provider.oauth.auth, p.qs, encodeFunction);
 		}
 
 		// Broadcast this event as an auth:init
