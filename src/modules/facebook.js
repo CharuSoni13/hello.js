@@ -17,7 +17,7 @@
 			},
 
 			// Authorization scopes
-			scope: {
+			scope_map: {
 				basic: 'public_profile',
 				email: 'email',
 				share: 'user_posts',
@@ -44,11 +44,11 @@
 				// Reauthenticate
 				// https://developers.facebook.com/docs/facebook-login/reauthentication
 				if (p.options.force) {
-					p.qs.auth_type = 'reauthenticate';
+					p.query.auth_type = 'reauthenticate';
 				}
 
 				// Set the display value
-				p.qs.display = p.options.display || 'popup';
+				p.query.display = p.options.display || 'popup';
 			},
 
 			logout: function(callback, options) {

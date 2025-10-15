@@ -1,3 +1,4 @@
+
 hello.init({
 
 	box: {

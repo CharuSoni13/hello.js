@@ -16,14 +16,14 @@
 			// Refresh the access_token once expired
 			refresh: true,
 
-			scope: {
+			scope_map: {
 				basic: 'profile'
 			},
 
 			scope_delim: ' ',
 
-			login: function(p) {
-				p.options.popup.width = 710;
+			popup: {
+				width: 710
 			},
 
 			base: 'https://api.amazon.com/',

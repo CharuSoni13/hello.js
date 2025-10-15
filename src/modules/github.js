@@ -1,3 +1,4 @@
+
 (function(hello) {
 
 	hello.init({
@@ -13,7 +14,7 @@
 				response_type: 'code'
 			},
 
-			scope: {
+			scope_map: {
 				email: 'user:email'
 			},
 

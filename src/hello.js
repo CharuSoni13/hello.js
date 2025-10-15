@@ -104,9 +104,6 @@ hello.utils.extend(hello, {
 		// Ths could be problematic if the redirect_uri is indeed the final place,
 		// Typically this circumvents the problem of the redirect_url being a dumb relay page.
 		page_uri: window.location.href
-		,
-		// Optional whitelist for redirect targets. Can be string, RegExp, or array of either
-		redirect_whitelist: null
 	},
 
 	// Service configuration objects
@@ -196,7 +193,8 @@ hello.utils.extend(hello, {
 		var opts = p.options = utils.merge(_this.settings, p.options || {});
 
 		// Merge/override options with app defaults
-		opts.popup = utils.merge(_this.settings.popup, p.options.popup || {});
+		// Provider may define default popup sizes via provider.popup
+		opts.popup = utils.merge(_this.settings.popup, ( _this.services[p.network] && _this.services[p.network].popup ) || {}, p.options.popup || {});
 
 		// Network
 		p.network = p.network || _this.settings.default_service;
@@ -264,7 +262,7 @@ hello.utils.extend(hello, {
 		}
 
 		// Query string parameters, we may pass our own arguments to form the querystring
-		p.qs = utils.merge(qs, {
+		p.query = utils.merge(qs, {
 			client_id: encodeURIComponent(provider.id),
 			response_type: encodeURIComponent(responseType),
 			redirect_uri: encodeURIComponent(redirectUri),
@@ -290,7 +288,7 @@ hello.utils.extend(hello, {
 		var scope = _this.settings.scope ? [_this.settings.scope.toString()] : [];
 
 		// Extend the providers scope list with the default
-		var scopeMap = utils.merge(_this.settings.scope_map, provider.scope || {});
+		var scopeMap = utils.merge(_this.settings.scope_map, provider.scope_map || {});
 
 		// Add user defined scopes...
 		if (opts.scope) {
@@ -311,11 +309,13 @@ hello.utils.extend(hello, {
 		scope = utils.unique(scope).filter(filterEmpty);
 
 		// Save the the scopes to the state with the names that they were requested with.
-		p.qs.state.scope = scope.join(',');
+		p.query.state.scope = scope.join(',');
 
 		// Map scopes to the providers naming convention
-		scope = scope.map(function(item) {
-			// Does this have a mapping?
+		// Blacklist standardized scopes unless explicitly mapped in the provider
+		scope = scope.filter(function(item){
+			return !(item in _this.settings.scope_map) || (item in scopeMap);
+		}).map(function(item) {
 			return (item in scopeMap) ? scopeMap[item] : item;
 		});
 
@@ -327,14 +327,14 @@ hello.utils.extend(hello, {
 		scope = utils.unique(scope).filter(filterEmpty);
 
 		// Join with the expected scope delimiter into a string
-		p.qs.scope = scope.join(provider.scope_delim || ',');
+		p.query.scope = scope.join(provider.scope_delim || ',');
 
 		// Is the user already signed in with the appropriate scopes, valid access_token?
 		if (opts.force === false) {
 
 			if (session && 'access_token' in session && session.access_token && 'expires' in session && session.expires > ((new Date()).getTime() / 1e3)) {
 				// What is different about the scopes in the session vs the scopes in the new login?
-				var diff = utils.diff((session.scope || '').split(SCOPE_SPLIT), (p.qs.state.scope || '').split(SCOPE_SPLIT));
+				var diff = utils.diff((session.scope || '').split(SCOPE_SPLIT), (p.query.state.scope || '').split(SCOPE_SPLIT));
 				if (diff.length === 0) {
 
 					// OK trigger the callback
@@ -353,7 +353,7 @@ hello.utils.extend(hello, {
 		// Page URL
 		if (opts.display === 'page' && opts.page_uri) {
 			// Add a page location, place to endup after session has authenticated
-			p.qs.state.page_uri = utils.url(opts.page_uri).href;
+			p.query.state.page_uri = utils.url(opts.page_uri).href;
 		}
 
 		// Bespoke
@@ -370,39 +370,45 @@ hello.utils.extend(hello, {
 		(opts.display === 'none' && provider.oauth.grant && session && session.refresh_token)) {
 
 			// Add the oauth endpoints
-			p.qs.state.oauth = provider.oauth;
+			// Allow overriding oauth endpoints via options.oauth
+			var providerOAuth = utils.merge({}, provider.oauth || {});
+			if (opts.oauth) { providerOAuth = utils.merge(providerOAuth, opts.oauth); }
+			p.query.state.oauth = providerOAuth;
 
 			// Add the proxy url
-			p.qs.state.oauth_proxy = opts.oauth_proxy;
+			p.query.state.oauth_proxy = opts.oauth_proxy;
 
 		}
 
 		// Convert state to a string
 		if (provider.oauth.base64_state) {
-			p.qs.state = window.btoa(JSON.stringify(p.qs.state));
+			p.query.state = window.btoa(JSON.stringify(p.query.state));
 		}
 		else {
-			p.qs.state = encodeURIComponent(JSON.stringify(p.qs.state));
+			p.query.state = encodeURIComponent(JSON.stringify(p.query.state));
 		}
 
 		// URL
 		if (parseInt(provider.oauth.version, 10) === 1) {
 
 			// Turn the request to the OAuth Proxy for 3-legged auth
-			url = utils.qs(opts.oauth_proxy, p.qs, encodeFunction);
+			url = utils.qs(opts.oauth_proxy, p.query, encodeFunction);
 		}
 
 		// Refresh token
 		else if (opts.display === 'none' && provider.oauth.grant && session && session.refresh_token) {
 
 			// Add the refresh_token to the request
-			p.qs.refresh_token = session.refresh_token;
+			p.query.refresh_token = session.refresh_token;
 
 			// Define the request path
-			url = utils.qs(opts.oauth_proxy, p.qs, encodeFunction);
+			url = utils.qs(opts.oauth_proxy, p.query, encodeFunction);
 		}
 		else {
-			url = utils.qs(provider.oauth.auth, p.qs, encodeFunction);
+			// Apply oauth overrides when constructing auth URL
+			var authOAuth = utils.merge({}, provider.oauth || {});
+			if (opts.oauth) { authOAuth = utils.merge(authOAuth, opts.oauth); }
+			url = utils.qs(authOAuth.auth, p.query, encodeFunction);
 		}
 
 		// Broadcast this event as an auth:init
@@ -1412,12 +1418,6 @@ hello.utils.extend(hello.utils, {
 		else if ('oauth_redirect' in p) {
 			var url = decodeURIComponent(p.oauth_redirect);
 
-			// Attempt an additional decode to counter double-encoding
-			try {
-				url = decodeURIComponent(url);
-			}
-			catch (e) {}
-
 			if (isValidUrl(url)) {
 				location.assign(url);
 			}
@@ -1427,36 +1427,14 @@ hello.utils.extend(hello.utils, {
 
 		function isValidUrl(url) {
 			var regexp = /^https?:/;
-			if (!regexp.test(url)) {
-				return false;
-			}
+			return regexp.test(url)
 
-			// Optional global regex whitelist
-			if (Object.prototype.hasOwnProperty.call(window, 'HELLOJS_REDIRECT_URL') && !url.match(window.HELLOJS_REDIRECT_URL)) {
-				return false;
-			}
-
-			// Optional settings-based whitelist
-			var wl = (typeof hello !== 'undefined' && hello.settings) ? hello.settings.redirect_whitelist : null;
-			if (wl) {
-				var matchOne = function(w) {
-					if (typeof w === 'string') {
-						return url.indexOf(w) === 0;
-					}
-					if (w instanceof RegExp) {
-						return w.test(url);
-					}
-					return false;
-				};
-
-				if (Array.isArray(wl)) {
-					return wl.some(matchOne);
-				}
-
-				return matchOne(wl);
-			}
-
-			return true;
+				// If `HELLOJS_REDIRECT_URL` is defined in the window context, validate that the URL matches it.
+				&& (
+					!Object.prototype.hasOwnProperty.call(window, 'HELLOJS_REDIRECT_URL')
+					||
+					url.match(window.HELLOJS_REDIRECT_URL)
+				);
 		}
 
 		// Trigger a callback to authenticate

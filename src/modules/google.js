@@ -16,7 +16,7 @@
 			},
 
 			// Authorization scopes
-			scope: {
+			scope_map: {
 				basic: 'openid profile',
 				email: 'email',
 				birthday: '',
@@ -35,19 +35,19 @@
 
 			login: function(p) {
 
-				if (p.qs.response_type === 'code') {
+				if (p.query.response_type === 'code') {
 
 					// Let's set this to an offline access to return a refresh_token
-					p.qs.access_type = 'offline';
+					p.query.access_type = 'offline';
 				}
-				else if (p.qs.response_type.indexOf('id_token') > -1) {
-					p.qs.nonce = parseInt(Math.random() * 1e12, 10).toString(36);
+				else if (p.query.response_type.indexOf('id_token') > -1) {
+					p.query.nonce = parseInt(Math.random() * 1e12, 10).toString(36);
 				}
 
 				// Reauthenticate
 				// https://developers.google.com/identity/protocols/
 				if (p.options.force) {
-					p.qs.prompt = 'consent';
+					p.query.prompt = 'consent';
 				}
 			},
 

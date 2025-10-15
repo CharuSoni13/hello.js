@@ -15,7 +15,7 @@
 
 			// Authorization scopes
 			// See https://vk.com/dev/permissions
-			scope: {
+			scope_map: {
 				email: 'email',
 				friends: 'friends',
 				photos: 'photos',
@@ -28,7 +28,7 @@
 			refresh: true,
 
 			login: function(p) {
-				p.qs.display = window.navigator &&
+				p.query.display = window.navigator &&
 					window.navigator.userAgent &&
 					/ipad|phone|phone|android/.test(window.navigator.userAgent.toLowerCase()) ? 'mobile' : 'popup';
 			},
